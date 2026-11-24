@@ -10,6 +10,7 @@ that provisioning cannot drift between them.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import uuid
@@ -137,26 +138,38 @@ class SandboxClient:
                 return False
             raise
 
-    # -- git credentials ---------------------------------------------------
-    def seed_git_credentials(self, claim: Claim, *, username: str, token: str,
-                             host: str = "github.com") -> None:
-        """Write a git credential-store file inside the sandbox (mode 0600) so ``git clone/push``
-        over HTTPS works without ever putting the token in the environment or in a command line.
-        The token lives only in ~/.git-credentials and is readable solely by the git helper.
+    # -- secret files --------------------------------------------------------
+    def write_secret_file(self, claim: Claim, *, path: str, content: str, mode: int = 0o600) -> None:
+        """Write *content* to *path* inside the sandbox with *mode* (default 0600).
+
+        The value travels base64-encoded inside a single exec script: it never appears in the
+        process argv of the exec stream nor in the sandbox environment, only in the target file.
         """
         import base64
-        blob = base64.b64encode(f"https://{username}:{token}@{host}".encode()).decode()
+        blob = base64.b64encode(content.encode()).decode()
         script = (
             "set -e\n"
             f"umask 077\n"
-            f"printf '%s\n' {_q(blob)} | base64 -d > /root/.git-credentials\n"
-            f"chmod 600 /root/.git-credentials\n"
-            f"git config --global credential.helper 'store --file=/root/.git-credentials'\n"
+            f"mkdir -p {_q(os.path.dirname(path) or '/')}\n"
+            f"printf '%s' {_q(blob)} | base64 -d > {_q(path)}\n"
+            f"chmod {mode:o} {_q(path)}\n"
+        )
+        out, rc = self.exec(claim, ["bash", "-c", script], timeout=30)
+        if rc != 0:
+            raise ApiError(rc, f"writing {path} in sandbox failed: {out.decode('utf-8', 'replace')[:200]}")
+
+    def seed_git_credentials(self, claim: Claim, *, username: str, token: str,
+                             host: str = "github.com") -> None:
+        """Convenience wrapper: ~/.git-credentials + credential.helper, file-only (never env/argv)."""
+        self.write_secret_file(claim, path="/root/.git-credentials",
+                               content=f"https://{username}:{token}@{host}\n")
+        script = (
+            "git config --global credential.helper 'store --file=/root/.git-credentials'\n"
             f"git config --global user.name {_q(username)}\n"
         )
         out, rc = self.exec(claim, ["bash", "-c", script], timeout=30)
         if rc != 0:
-            raise ApiError(rc, f"git credential seeding failed: {out.decode('utf-8', 'replace')[:200]}")
+            raise ApiError(rc, f"git config failed: {out.decode('utf-8', 'replace')[:200]}")
 
     # -- execution ---------------------------------------------------------
     def exec(self, claim: Claim, command: list[str], *, timeout: float = 120.0,

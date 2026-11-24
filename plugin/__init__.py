@@ -133,22 +133,8 @@ class KubeSandboxEnvironment(BaseEnvironment):
                 return self._claim
             self._claim = self.client().create(self.task_id or "default")
             log.info("kube-sandbox: claim %s -> pod %s", self._claim.name, self._claim.sandbox)
-            self._seed_git()
+            self._seed_secrets()
             return self._claim
-
-    def _seed_git(self):
-        """If terminal.kube_sandbox_git_token is set, drop it into ~/.git-credentials inside the VM
-        (never into env or argv). Disabled by default: no secret crosses into the sandbox unless asked."""
-        token = _cfg("kube_sandbox_git_token") or os.environ.get("KUBE_SANDBOX_GIT_TOKEN")
-        if not token:
-            return
-        user = _cfg("kube_sandbox_git_user", default="unetassedecafe") or "unetassedecafe"
-        host = _cfg("kube_sandbox_git_host", default="github.com") or "github.com"
-        try:
-            self.client().seed_git_credentials(self._claim, username=user, token=token, host=host)
-            log.info("kube-sandbox: git credentials seeded for %s@%s (file-only, not env)", user, host)
-        except Exception as exc:
-            log.warning("kube-sandbox: git credential seeding skipped: %s", exc)
 
     @property
     def home(self) -> str:
@@ -168,6 +154,56 @@ class KubeSandboxEnvironment(BaseEnvironment):
             return out.decode("utf-8", "replace"), int(rc)
 
         return _ThreadedProcessHandle(run)
+
+    def _seed_secrets(self):
+        """Write opt-in secret files into the VM from pod env vars — never into the sandbox env.
+
+        ``terminal.kube_sandbox_secret_files`` is a list of maps, e.g.::
+
+            terminal:
+              kube_sandbox_secret_files:
+                - path: /root/.git-credentials      # target file inside the micro-VM
+                  env: GH_TOKEN                      # source: env var of the *Hermes* pod (from a k8s secret)
+                  mode: 0600                         # optional, default 0600
+                - path: /root/.npmrc
+                  env: NPM_TOKEN
+
+        The value is base64-carried through a single exec script and lands only in the target
+        file; it never appears in the sandbox's environment or in any process argv.
+        """
+        entries = _cfg("kube_sandbox_secret_files", default=None) or []
+        if isinstance(entries, dict):
+            entries = [{"path": k, "env": v} for k, v in entries.items()]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path, env_name = entry.get("path"), entry.get("env")
+            if not path or not env_name:
+                continue
+            value = os.environ.get(str(env_name))
+            if not value:
+                log.warning("kube-sandbox: secret env %s not set in Hermes pod; skipping %s", env_name, path)
+                continue
+            mode = int(str(entry.get("mode", "0600")), 8)
+            try:
+                self.client().write_secret_file(self._claim, path=str(path), content=value, mode=mode)
+                log.info("kube-sandbox: secret file %s seeded from env %s (mode %o)", path, env_name, mode)
+            except Exception as exc:
+                log.warning("kube-sandbox: seeding %s failed: %s", path, exc)
+        # Back-compat: the old git-specific keys map to the generic mechanism.
+        token = _cfg("kube_sandbox_git_token") or os.environ.get("KUBE_SANDBOX_GIT_TOKEN")
+        if token:
+            user = _cfg("kube_sandbox_git_user", default="unetassedecafe") or "unetassedecafe"
+            host = _cfg("kube_sandbox_git_host", default="github.com") or "github.com"
+            try:
+                self.client().seed_git_credentials(self._claim, username=user, token=token, host=host)
+                log.info("kube-sandbox: git credentials seeded for %s@%s (file-only)", user, host)
+            except Exception as exc:
+                log.warning("kube-sandbox: git credential seeding skipped: %s", exc)
+
+    @property
+    def home(self) -> str:
+        return _cfg("kube_sandbox_home", default=DEFAULT_HOME) or DEFAULT_HOME
 
     # -- teardown ----------------------------------------------------------
     def cleanup(self):
@@ -204,24 +240,6 @@ class KubeSandboxProvider(TerminalEnvironmentProvider):
 
     @property
     def default_cwd(self) -> str:
-        return self.home
-
-    def _seed_git(self):
-        """If terminal.kube_sandbox_git_token is set, drop it into ~/.git-credentials inside the VM
-        (never into env or argv). Disabled by default: no secret crosses into the sandbox unless asked."""
-        token = _cfg("kube_sandbox_git_token") or os.environ.get("KUBE_SANDBOX_GIT_TOKEN")
-        if not token:
-            return
-        user = _cfg("kube_sandbox_git_user", default="unetassedecafe") or "unetassedecafe"
-        host = _cfg("kube_sandbox_git_host", default="github.com") or "github.com"
-        try:
-            self.client().seed_git_credentials(self._claim, username=user, token=token, host=host)
-            log.info("kube-sandbox: git credentials seeded for %s@%s (file-only, not env)", user, host)
-        except Exception as exc:
-            log.warning("kube-sandbox: git credential seeding skipped: %s", exc)
-
-    @property
-    def home(self) -> str:
         return _cfg("kube_sandbox_home", default=DEFAULT_HOME) or DEFAULT_HOME
 
     def is_available(self) -> bool:
@@ -269,7 +287,3 @@ class KubeSandboxProvider(TerminalEnvironmentProvider):
         persistent = bool((container_config or {}).get("container_persistent"))
         return KubeSandboxEnvironment(cwd=cwd, timeout=timeout, task_id=task, image=override,
                                       persistent=persistent)
-
-
-def register(ctx):
-    ctx.register_terminal_environment_provider(KubeSandboxProvider())
