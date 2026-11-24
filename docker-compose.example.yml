@@ -1,0 +1,36 @@
+services:
+  provision:
+    image: debian:trixie-slim
+    container_name: kubesandbox-provision
+    restart: unless-stopped
+    environment:
+      # The control-plane kubeconfig: a token-based one (an exec/OIDC login plugin cannot run here).
+      KUBECONFIG: /etc/kubesandbox/kubeconfig
+      KUBE_SANDBOX_NAMESPACE: sandboxes
+      KUBE_SANDBOX_TEMPLATE: dev
+      KUBE_SANDBOX_CONTAINER: dev
+      # TTL for a claim nobody destroys (the environment is removed on a clean exit; a TTL bounds a crash).
+      KUBE_SANDBOX_TTL: "28800"
+    volumes:
+      - kubesandbox-state:/var/lib/kubesandbox
+      # read-only: the kubeconfig the provisioner needs, never mounted into a sandbox
+      - ${KUBECONFIG_SOURCE:-~/.kube/config}:/etc/kubesandbox/kubeconfig:ro
+    command: ["/usr/local/bin/kubesandbox", "serve"]
+
+  api:
+    image: debian:trixie-slim
+    container_name: kubesandbox-api
+    restart: unless-stopped
+    depends_on: [provision]
+    volumes:
+      - kubesandbox-state:/var/lib/kubesandbox
+    environment:
+      KUBE_SANDBOX_STATE: /var/lib/kubesandbox/state.json
+      # The desktop/bot Mac reaches this over the LAN (or Tailscale); bind it explicitly.
+      KUBE_SANDBOX_API_BIND: 0.0.0.0:8765
+    ports:
+      - "8765:8765"
+    command: ["/usr/local/bin/kubesandbox", "api"]
+
+volumes:
+  kubesandbox-state:
