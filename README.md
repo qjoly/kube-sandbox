@@ -88,3 +88,24 @@ sshd refuses ed25519 public keys produced by this host's `cryptography` build. P
 
 - **Desktop streams** (`supports_streams` / `exec_prefix`) — Phase 3 in the plan, needs an image with the
   desktop stack.
+
+## Injecter des secrets dans la micro-VM (opt-in)
+
+Par défaut, **aucun** secret ne traverse vers la sandbox. Pour en injecter, liste-les
+explicitement — le contenu part d'une **variable d'environnement du pod Hermes** (donc d'un
+secret k8s) et atterrit **uniquement dans un fichier** de la VM (jamais dans l'env de la VM) :
+
+```yaml
+terminal:
+  kube_sandbox_secret_files:
+    - path: /root/.git-credentials        # fichier cible dans la micro-VM
+      env: GH_TOKEN                       # env var du pod Hermes (secret k8s)
+      mode: "0600"                        # optionnel, défaut 0600
+    - path: /root/.npmrc
+      env: NPM_TOKEN
+```
+
+La valeur est transportée en base64 dans un unique script exec et n'apparaît ni dans
+l'environnement de la sandbox, ni dans l'argv d'un process. Les anciennes clés
+`kube_sandbox_git_token` / `kube_sandbox_git_user` / `kube_sandbox_git_host` restent
+supportées (back-compat) et alimentent `~/.git-credentials` + `credential.helper`.
