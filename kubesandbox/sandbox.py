@@ -137,6 +137,27 @@ class SandboxClient:
                 return False
             raise
 
+    # -- git credentials ---------------------------------------------------
+    def seed_git_credentials(self, claim: Claim, *, username: str, token: str,
+                             host: str = "github.com") -> None:
+        """Write a git credential-store file inside the sandbox (mode 0600) so ``git clone/push``
+        over HTTPS works without ever putting the token in the environment or in a command line.
+        The token lives only in ~/.git-credentials and is readable solely by the git helper.
+        """
+        import base64
+        blob = base64.b64encode(f"https://{username}:{token}@{host}".encode()).decode()
+        script = (
+            "set -e\n"
+            f"umask 077\n"
+            f"printf '%s\n' {_q(blob)} | base64 -d > /root/.git-credentials\n"
+            f"chmod 600 /root/.git-credentials\n"
+            f"git config --global credential.helper 'store --file=/root/.git-credentials'\n"
+            f"git config --global user.name {_q(username)}\n"
+        )
+        out, rc = self.exec(claim, ["bash", "-c", script], timeout=30)
+        if rc != 0:
+            raise ApiError(rc, f"git credential seeding failed: {out.decode('utf-8', 'replace')[:200]}")
+
     # -- execution ---------------------------------------------------------
     def exec(self, claim: Claim, command: list[str], *, timeout: float = 120.0,
              stdin_data: bytes | None = None) -> tuple[bytes, int]:

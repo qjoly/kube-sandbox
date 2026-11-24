@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import re
 import shlex
 import shutil
@@ -41,10 +42,23 @@ def _cfg(*keys, default=None):
 
 
 def _kubesandbox_pkg():
-    # The loader imports this file as hermes_plugins.<slug> with __path__ = plugin dir,
-    # but bare `import kubesandbox` does not resolve from there; use a relative import.
-    from . import kubesandbox  # type: ignore[no-redef]
-    return kubesandbox
+    # The loader imports this file as hermes_plugins.<slug> with __path__ = plugin dir.
+    # Try the relative import first (works when the loader sets __path__), then fall back
+    # to loading the sibling package by file path for loaders that only set __package__.
+    try:
+        from . import kubesandbox  # type: ignore[no-redef]
+        return kubesandbox
+    except ImportError:
+        import importlib.util
+        pkg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kubesandbox")
+        spec = importlib.util.spec_from_file_location(
+            "kube_sandbox_kubesandbox", os.path.join(pkg_dir, "__init__.py"),
+            submodule_search_locations=[pkg_dir])
+        mod = importlib.util.module_from_spec(spec)
+        mod.__path__ = [pkg_dir]
+        sys.modules["kube_sandbox_kubesandbox"] = mod
+        spec.loader.exec_module(mod)
+        return mod
 
 
 def _sandbox_client(timeout: float = 30.0):
@@ -119,7 +133,22 @@ class KubeSandboxEnvironment(BaseEnvironment):
                 return self._claim
             self._claim = self.client().create(self.task_id or "default")
             log.info("kube-sandbox: claim %s -> pod %s", self._claim.name, self._claim.sandbox)
+            self._seed_git()
             return self._claim
+
+    def _seed_git(self):
+        """If terminal.kube_sandbox_git_token is set, drop it into ~/.git-credentials inside the VM
+        (never into env or argv). Disabled by default: no secret crosses into the sandbox unless asked."""
+        token = _cfg("kube_sandbox_git_token") or os.environ.get("KUBE_SANDBOX_GIT_TOKEN")
+        if not token:
+            return
+        user = _cfg("kube_sandbox_git_user", default="unetassedecafe") or "unetassedecafe"
+        host = _cfg("kube_sandbox_git_host", default="github.com") or "github.com"
+        try:
+            self.client().seed_git_credentials(self._claim, username=user, token=token, host=host)
+            log.info("kube-sandbox: git credentials seeded for %s@%s (file-only, not env)", user, host)
+        except Exception as exc:
+            log.warning("kube-sandbox: git credential seeding skipped: %s", exc)
 
     @property
     def home(self) -> str:
@@ -176,6 +205,20 @@ class KubeSandboxProvider(TerminalEnvironmentProvider):
     @property
     def default_cwd(self) -> str:
         return self.home
+
+    def _seed_git(self):
+        """If terminal.kube_sandbox_git_token is set, drop it into ~/.git-credentials inside the VM
+        (never into env or argv). Disabled by default: no secret crosses into the sandbox unless asked."""
+        token = _cfg("kube_sandbox_git_token") or os.environ.get("KUBE_SANDBOX_GIT_TOKEN")
+        if not token:
+            return
+        user = _cfg("kube_sandbox_git_user", default="unetassedecafe") or "unetassedecafe"
+        host = _cfg("kube_sandbox_git_host", default="github.com") or "github.com"
+        try:
+            self.client().seed_git_credentials(self._claim, username=user, token=token, host=host)
+            log.info("kube-sandbox: git credentials seeded for %s@%s (file-only, not env)", user, host)
+        except Exception as exc:
+            log.warning("kube-sandbox: git credential seeding skipped: %s", exc)
 
     @property
     def home(self) -> str:
